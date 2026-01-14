@@ -1,0 +1,970 @@
+---
+title: "Juli:Menstrual Cycle & Mood Analysis"
+author: "Kyra Edwards"
+date: "`r format(Sys.Date())`"
+output: 
+  rmdformats::readthedown:
+    code_folding: show
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    css: custom.css
+---
+
+```{r libraries, message=F, warning=F , echo=F}
+library(dplyr) #data wrangling
+library(ggplot2) #graphs
+library(knitr) #table presentation
+library(lme4) #random effect models
+library(gam) #gam modeling
+library(kableExtra) # kable output
+library(tidymv) #predict gam
+library(jtools) #lm output
+library(stargazer) #lm output
+```
+
+# Data Cleaning 
+
+ Data cleaning ensures:
+
+  - All users are 18 and above.
+  - Reduces data set to users with Menstrual Cycle (MC) data and dates
+  - Date variables are in Date Format.
+ 
+
+```{r load data, echo=F}
+setwd("~/Downloads")
+juli_all<-read.csv("kyra_extract.csv")
+
+#remove all users under the age of 18.
+
+juli_all<- juli_all[juli_all$ageatsignup>17,]
+
+```
+
+
+```{r reduce data to those with menstrual cycel data, echo=F}
+
+#create a vector of users that have menstrual cycle data
+keep<-unique(juli_all$userid[juli_all$last_menstruation_date!=""])
+
+#create vector with all rows with users that have menstrual cycle data
+rows_keep<-c()
+
+for (i in 1:nrow(juli_all)){
+  
+  if(juli_all[i,1] %in% keep){
+    
+    rows_keep<-append(rows_keep, i)
+  }
+  
+}
+
+#reduced subset 
+juli_all<-juli_all[rows_keep,]
+
+```
+
+
+
+```{r date cleaning,  echo=F}
+
+#remove observations without a date
+juli_1<-juli_all[-which(is.na(juli_all$findingdatetime)),]
+
+#transform date variables from strings to type date
+juli_1$findingdatetime<-as.Date(juli_1$findingdatetime)
+
+juli_1$last_menstruation_date<-as.Date(juli_1$last_menstruation_date)
+
+#clean
+juli_1<-juli_1[which(!is.na(juli_1$findingdatetime)),]
+
+```
+
+
+## Data Transformation
+
+   We created an algorithm to determine the how the finding date of each observation related to a period date. 
+   
+   To do this we create a variable, 'cycle day' and limited it to the range -14 to 21. 
+
+
+```{r algorithm to get cycle day ,echo=F}
+
+#There are two parts to this algorithm. 
+# 1. Find the time since the last period for positive values of the variable cycle day
+# 2. Find the time until the next period for negative values of the variable cycle day
+# Cycle day will be updated at each stage
+
+
+#Sort into chronological order for each user 
+juli_1<-juli_1 %>%  group_by(userid) %>% arrange(findingdatetime, .by_group = T)
+
+#define empty vector to take value of last period
+period<-c()
+
+#for each loop, we need a place holder for a check to see if we are still referring to the same user
+#define empty vector to take value of current user
+current_user<-"empty"
+
+# define an algorithm to find the users most recent period
+
+for (i in 1:nrow(juli_1)){
+
+  #user check, if new user, reset period variable
+  if(juli_1$userid[i]!=current_user){
+    current_user<-juli_1$userid[i]
+    period<-NA
+    }
+  
+  # if the observation date is after the menstruation date then make the period var that period, else NA 
+  # once this is hits the first period of that user then it will know that period
+  # 
+  
+  if(!is.na(juli_1$last_menstruation_date[i])){
+      #store period proxy
+      period<- juli_1$last_menstruation_date[i]
+      
+  }
+  
+    juli_1$last_menstruation_date[i]<- period
+    
+    #most periods are recorded the day after so need an catch for this
+    
+    if(!is.na(period)){
+      
+        if(juli_1$findingdatetime[i]-period ==1){
+          
+            #go back to -1 and if that is the same date, change that
+            if (juli_1$findingdatetime[i-1]== period){
+            
+              juli_1$last_menstruation_date[i-1]<- period
+            }
+
+      }  
+      
+    }
+    
+}
+
+
+
+# Create a new variable "cycle_day" to denote the day of the menstrual cycle.
+
+#Loop and only include if the it is the -14 to +21
+juli_1$cycle_day<-NA
+
+#difference in days
+dif<- juli_1$findingdatetime -juli_1$last_menstruation_date
+
+#reset less than 21 days we will use negative values for these.
+dif[dif>21]<-NA
+juli_1$cycle_day<-dif
+
+#2. Get next menstruation date for negative values 
+
+
+#Define new variable next menstruation date
+
+juli_1$next_menstruation_date<-NA
+period<-c()
+
+#define empty vector to take value of current user
+current_user<-"empty"
+
+for (i in nrow(juli_1):1){
+
+  #user check, if new user, reset period var
+  if(juli_1$userid[i]!=current_user){
+    current_user<-juli_1$userid[i]
+    period<-NA
+    }
+  
+  # if the observation date is after the menstruation date then make the period var that period, else NA 
+  # once this is hits the first period of that user then it will know that period
+  # 
+  
+  if(!is.na(juli_1$last_menstruation_date[i]) & juli_1$findingdatetime[i]== juli_1$last_menstruation_date[i]){
+      #store period proxy
+      period<- juli_1$last_menstruation_date[i]
+      
+  }
+   
+  
+    juli_1$next_menstruation_date[i]<- period
+
+    }
+
+#covert to date
+juli_1$next_menstruation_date<-as.Date(juli_1$next_menstruation_date, origin="1970-01-01")
+
+# Now get in terms of cycle day
+
+# Get in terms of days away from period
+
+dif2<-juli_1$findingdatetime- juli_1$next_menstruation_date  
+
+z<-dif2[which(dif2 >=(-14) & dif2<0)]
+
+
+# When there is overlap we need to ensure the negative values are prioritized. 
+
+#dif2[(dif2 >(-14) & dif2<0)]
+dif2[dif2<(-14)]<-NA
+dif2[dif2==0]<-NA
+
+#update 
+juli_1$cycle_day[which(!is.na(dif2))]<- dif2[which(!is.na(dif2))]
+
+#complete
+
+```
+
+ After the transformation we found that 160,787 (72%), of the observations were not within -14 or +21 days of a period, therefore we dropped these observations.
+ 
+  This reduced the data set to 60,363 observations with 2691 users. 
+ 
+## Transform Outcome Variable 
+
+  We transformed the outcome variable, mood, to be measured as a relative measure as a distance from each users mean. 
+  
+```{r mood transform, echo=F}
+
+#Scale changed from 0 - 10 to 1-7 as 1, 3, 7, 9 were missing so now all measures are represented as equidistant from one another
+
+
+juli_1$mood<-1 #0 will stay as 1
+juli_1$mood[juli_1$dq_mood_energy_mood==2]<-2 #2 will still =2
+juli_1$mood[juli_1$dq_mood_energy_mood==4]<-3.#no 3 so 4 wil become 3
+juli_1$mood[juli_1$dq_mood_energy_mood==5]<-4
+juli_1$mood[juli_1$dq_mood_energy_mood==6]<-5
+juli_1$mood[juli_1$dq_mood_energy_mood==8]<-6
+juli_1$mood[juli_1$dq_mood_energy_mood==10]<-7
+
+
+# Now create a measure that represent a the relative difference of standard deviations from the persons mean for each measurement.
+
+juli_1$mean_mood<-NA
+
+juli_1$sd_mood<-NA
+
+#find each users mean mood measurement and standard deviation of their results save to all of their rows
+
+for(i in (unique(juli_1$userid))){
+  
+    user_mean<-juli_1%>% subset(userid==i)%>% ungroup() %>% select( dq_mood_energy_mood) %>% summarise("mean"=       mean(dq_mood_energy_mood, na.rm=T))
+  
+    juli_1[juli_1$userid==i,]$mean_mood<- as.double(user_mean)
+  
+    user_sd<- juli_1%>% subset(userid==i)%>% ungroup() %>% select( dq_mood_energy_mood) %>% summarise("sd"=          sd(dq_mood_energy_mood, na.rm=T))
+  
+    juli_1[juli_1$userid==i,]$sd_mood<-as.double((user_sd))
+  
+}
+
+
+#find each day's mood measurement relations to the user's mean
+
+#find the difference 
+
+#translate distance to standard deviations
+
+
+juli_1$mood_relative<- NA
+
+
+for( i in 1:nrow(juli_1)){
+  
+    juli_1$mood_relative[i]<- (juli_1$dq_mood_energy_mood[i]-juli_1$mean_mood[i])/ juli_1$sd_mood[i]
+}
+
+#NaN means they did not enter a mood score
+
+```
+
+
+
+```{r clean, echo=F}
+
+# sum(is.na(juli_1$cycle_day))/ nrow(juli_1)
+
+# #160787 ,72%  of observations were not within -14 or +21 days of a period, therefore we are not able to use them. 
+# These observations are to be deleted
+
+juli_1<-juli_1[!is.na(juli_1$cycle_day), ]
+
+```
+
+
+```{r distribution of 1 period, echo=F}
+
+
+as.numeric(juli_1$cycle_day) %>% density() %>%  plot(main="Distribution of Cycle Days in all Users (# periods = 1+) whole set ")
+
+```
+
+
+## Reduce data set to only who has measured mood
+
+  Reduces data set to 11,325 observations with 543 users.
+
+```{r remove days with no mood observations, echo=F}
+
+juli_mood<- juli_1[which(!is.na(juli_1$mood_relative)),]
+
+as.numeric(juli_mood$cycle_day) %>% density() %>%  plot(main="Distribution of Cycle Days in all Users has >1 measure of mood ")
+
+```
+
+
+
+## Lower boundaries subsets
+
+For reliability and validity, we explore two options of possible lower boundaries of inclusion criteria. This should ensure good distribution of data from each user across the cycle days.  
+
+    We created a subset of users with  
+    1. A miniumum of 5 observations
+    2. A minimum of 2 periods 
+    
+```{r lower acceptable boundaries subset, warning=F, message=F, echo=F}
+# Subset of users with >= 5 days
+
+#initialise a vector to hold the number of obvs each person has.
+n_vals<-c()
+
+#initialize a vector with the user IDs of the users with over 5 observations
+over5_users<-c()
+
+    for(i in (unique(juli_1$userid))){
+  
+      n<-juli_mood %>% subset(userid==i) %>% select(dq_mood_energy_mood) %>% nrow()
+  
+      if( n>5){
+    
+        over5_users<-c(over5_users, i) 
+      }
+ 
+    n_vals<-c(n_vals,n)
+
+    }
+
+#370 users
+
+juli_five_days<- juli_1[which(juli_1$userid %in% over5_users),]
+
+# A subset of users with 2 periods
+
+#initialize vector for number of periods for each users 
+periods<-c()
+
+#initialize a vector for the users ids who have more than 1 period logged
+multiple_period_users<-c()
+
+# a loop to traverse through each user and find the number of periods if they have more than 1 record their ID.
+for( i in 1:length(keep) ){
+  
+ loop<-(length(unique(juli_mood$last_menstruation_date[juli_mood$userid==keep[i]][which(!is.na(juli_mood$last_menstruation_date[juli_mood$userid==keep[i]]))])))
+ 
+ if(loop>1){multiple_period_users<-c(multiple_period_users, keep[i])}
+ 
+periods<-c(loop, periods)  
+
+}
+
+
+
+
+
+```
+
+
+1. 370 users have more than 5 observations. 
+
+
+  The distribution of daily mood observations seems to remain consistent with both of these subsets. This distribution is also quite uniform across all days of the menstrual cycle therefore a good representation of all days across the cycle which is important for accurate analysis. 
+
+Only performed on subsets with a minimum of 5 observations.
+  
+
+# Demographics 
+
+## Age of all avaliable data and subset of users with >5 recordings 
+
+   Table of users by there age.
+
+```{r age, results='asis', echo=F}
+#Age table
+
+age_freq<-(juli_mood %>% group_by(userid) %>% summarise("age"= mean(ageatsignup, na.rm=T)) %>% select(age))[[1]] %>% hist(breaks=c(18, 20, 25, seq(30, 45, 5), 53), plot=F)
+
+data.frame("Age Range"= c("18-20", "21-25", "26-30", "31-35", "36-40", "41-45", "46+"), "Count"= age_freq$counts ) %>% stargazer(type = "html", summary=F)
+
+
+#Age plot
+
+juli_mood %>% group_by(userid) %>% summarise("age"= mean(ageatsignup, na.rm=T)) %>%  ggplot(aes(x=age)) + geom_histogram(na.rm=T,  bins = 20, color="blue", fill="lightblue") + ggtitle("Age distribution of all sample, all data")
+
+```
+
+## Age of users in final data set
+
+```{r, results='asis', echo=F}
+#Age table
+
+age_freq<-(juli_five_days %>% group_by(userid) %>% summarise("age"= mean(ageatsignup, na.rm=T)) %>% select(age))[[1]] %>% hist(breaks=c(18, 20, 25, seq(30, 45, 5), 51), plot=F)
+
+data.frame("Age Range"= c("18-20", "21-25", "26-30", "31-35", "36-40", "41-45", "46+"), "Count"= age_freq$counts ) %>% as.data.frame() %>%  stargazer(type = "html", summary=F)
+
+#Age plot
+
+juli_five_days %>% group_by(userid) %>% summarise("age"= mean(ageatsignup, na.rm=T)) %>%  ggplot(aes(x=age)) + geom_histogram(na.rm=T,  bins = 20, color="blue", fill="lightblue") + ggtitle("Age distribution of all sample, all data")
+
+```
+
+## Gender, All avaliable distribution
+```{r gender, echo=F}
+
+genders<-c()
+
+
+  
+  for( i in unique(juli_mood$userid)){
+    
+    genders<-c(genders, as.vector(juli_mood[juli_mood$userid==i, 7])[[1]][1])
+    
+  }
+
+t1<-table(genders)
+
+t1b<- table(genders)/ sum(table(genders))
+t1c<-as.data.frame(cbind(t1, as.data.frame(table(genders)/ sum(table(genders)))$Freq)) 
+
+names(t1c)<-c( "Count", "Percentage")
+
+t2<-table(juli_mood$gender)
+t2b<-table(juli_mood$gender)/ sum(table(juli_mood$gender))
+
+t2c<-as.data.frame(cbind(t2, as.data.frame(table(juli_mood$gender)/ sum(table(juli_mood$gender)))$Freq))
+
+names(t2c)<-c( "Count", "Percentage")
+
+
+t1c %>% kable("html", align = 'clc', caption = 'Individuals distribution') 
+ 
+t2c %>%
+  kable("html", align = 'clc', caption = 'Overall Sample Representation')
+
+
+```
+
+## Gender, final model
+
+```{r gender 2, echo=F}
+genders<-c()
+
+  for( i in unique(juli_five_days$userid)){
+    
+    genders<-c(genders, as.vector(juli_five_days[juli_five_days$userid==i, 7])[[1]][1])
+    
+  }
+t1<-table(genders)
+
+t1b<- table(genders)/ sum(table(genders))
+t1c<-as.data.frame(cbind(t1, as.data.frame(table(genders)/ sum(table(genders)))$Freq)) 
+
+names(t1c)<-c( "Count", "Percentage")
+
+
+t2<-table(juli_five_days$gender)
+t2b<-table(juli_five_days$gender)/ sum(table(juli_five_days$gender))
+
+t2c<-as.data.frame(cbind(t2, as.data.frame(table(juli_five_days$gender)/ sum(table(juli_five_days$gender)))$Freq))
+
+names(t2c)<-c( "Count", "Percentage")
+
+
+t1c %>% kable("html", align = 'clc', caption = 'Individuals distribution')
+ 
+t2c %>%
+  kable("html", align = 'clc', caption = 'Overall Sample Representation')
+
+
+```
+
+## Ethnicity, all sample
+
+  A table and plot outlining the ethnicities in the sample
+
+```{r ethnicity 1, results='asis', echo=F}
+
+juli_mood$ethnicity[which(juli_mood$ethnicity=="")]="Unknown"
+ethnicity<-c()
+
+  for( i in unique(juli_mood$userid)){
+    
+    ethnicity<-c(ethnicity, as.vector(juli_mood[juli_mood$userid==i, 5])[[1]][1])
+    
+  }
+
+t_e1<-ethnicity %>% table() %>% as.data.frame()
+
+names(t_e1) <-c("Ethnicity", "Number of Users in Sample")
+
+t_e1%>% stargazer(type = "html", summary=F)
+
+```
+
+## Ethnicity on subset of users in the final model
+
+```{r ethnicity 2, results='asis', echo=F}
+
+juli_five_days$ethnicity[which(juli_five_days$ethnicity=="")]="Unknown"
+ethnicity<-c()
+
+  for( i in unique(juli_five_days$userid)){
+    
+    ethnicity<-c(ethnicity, as.vector(juli_five_days[juli_five_days$userid==i, 5])[[1]][1])
+    
+  }
+
+t_e2<-ethnicity %>% table() %>% as.data.frame() 
+
+names(t_e2) <-c("Ethnicity", "Number of Users in Sample")
+t_e2%>%stargazer(type = "html", summary=F)
+
+```
+
+
+
+
+## PHQ Validation
+
+  Below is the output of a linear model showing there is a significant association between PHQ Score and the regular mood score that the users gave (p<0.004).
+  
+  
+
+```{r phq verification,results='asis', echo=F, warning=F}
+
+phq_mood<-lm(mood_relative ~ depr_bw_total, data=juli_five_days)
+
+phq_mood %>% stargazer(type = "html", column.labels = c("Mood"), title="Mood Score Validated by PHQ", dep.var.labels = c("PHQ Score"))
+
+```
+
+
+# Exploratory Analysis
+
+A look at the mean values of mood score across different data sets. 
+
+```{r day graph, echo=F, message=F, warning=F}
+
+juli_five_days_mean<-juli_five_days%>% subset(cycle_day<14)%>%  group_by(cycle_day)%>% summarise("day_mean"= mean(mood_relative, na.rm=T)) 
+
+
+
+juli_mood%>% subset(cycle_day<14)%>%  group_by(cycle_day)%>% summarise("day_mean"= mean(mood_relative)) %>%  ggplot( aes(cycle_day,day_mean))+geom_point(col="yellow", size=5)+ geom_point(aes(cycle_day, day_mean), data=juli_five_days_mean, col="blue", size=5) +ggtitle(" Mean Relative Change in Daily Mood by Cycle Day")
+
+
+```
+
+The graph above shows the mean of each day of the cycle for the 3 different sets of data. 
+
+<span style="color: yellow;"> Yellow </span>: All available data
+
+<span style="color: blue;"> Blue </span>: Subset of those who logged >5 Days
+
+
+# Models
+
+
+  After observing the shape of the data we ran modelling techniques to reflect this. 
+  
+  We will run regression models on all data sets, then see what is the entire data before running it on the lower bounded subset to run the final models on.
+
+  For a linear regression we a squared term to account for the curvature in trend in the data.
+  
+  
+## All avaliable data 
+
+### All data: simple linear regression
+
+$$
+y = Cycle Day + CycleDay^2 + c
+$$
+  
+```{r simple linear model on all, results='asis',echo=F, warning=F}
+
+# create cycle day squared to be able to make a quadratic model
+juli_mood$cycle_day<-as.numeric(juli_mood$cycle_day)
+
+juli_mood$daysq<- juli_mood$cycle_day^2
+
+juli_mood_28days<-juli_mood%>% subset(cycle_day<14)
+
+lm(mood_relative ~ cycle_day + daysq, data=juli_mood_28days) %>% stargazer(type = "html", summary=T)
+
+```
+
+### Multiple linear regression
+
+Here we've added in the confounding variables available in the data set.
+    
+$$
+y = Cycle Day + CycleDay^2 + Age+ FindingDate + Gender + Step Count + c
+$$  
+
+```{r multiple linear model on all, results='asis', echo=F, message=F, warning=F}
+
+# linear model with confounding on confouding
+lm(mood_relative ~ cycle_day + daysq+ ageatsignup+ findingdatetime + gender + steps_count, data=juli_mood_28days) %>% stargazer(type = "html", summary=T)
+
+```
+
+
+### General Additive Model
+
+$$
+y = Smooth(Cycle Day)
+$$
+
+
+```{r gam all, echo=F}
+
+gam_all<-gam(mood_relative~s(cycle_day), data=juli_mood_28days)
+
+gam_all %>% summary()
+
+gam_all %>% plot(main="General Additive Model")
+```
+
+
+
+# Final Models (Users with 5+ days recorded) 
+
+
+### Simple Polynomial regression
+
+$$
+y = Cycle Day + Cycle Day^2 + c
+$$
+
+
+```{r five days 2nd order polynomial, warning=F, results='asis', message=F,echo=F}
+
+juli_five_days$cycle_day<-as.numeric(juli_five_days$cycle_day)
+
+juli_five_days$daysq<- (as.numeric(juli_five_days$cycle_day)^2)
+
+juli_five_days<-juli_five_days%>% subset(cycle_day<14)
+# recreate final model
+finalmodel<-lm(mood_relative ~cycle_day + daysq, data=juli_five_days) 
+
+finalmodel %>% stargazer(type = "html", title="Final Model", dep.var.caption = "Users with >5 days entered", column.labels = c("Relative Mood Score (Std Dvs)", covariate.labels=c("Cycle Day", "Cycle Day Squared")))
+  
+```
+
+```{r model predictions, echo=F, warning=F, message=F}
+#predictions value
+x<- -14:13
+xsq<- x^2
+  
+
+finalmodelfit<-predict(finalmodel,list("cycle_day"=x, "daysq"=xsq),  interval = "confidence") %>% as_tibble()
+
+
+
+
+new_dot_plot<- juli_mood %>% group_by(cycle_day)%>% summarise("mean"=mean(mood_relative)) %>% subset(cycle_day<14)%>% ggplot(aes(cycle_day, mean))+geom_point(color="pink", lwd=4)
+#plot
+
+
+new_dot_plot +ggtitle("Daily Mood Change per Day of Cycle ")+labs(x="Day of Cycle", y="Average Mood Score Standard Deviation Change")+ theme(plot.title = element_text(hjust = 0.5))+geom_point(color="red")+ geom_ribbon(aes(ymin= finalmodelfit$lwr, ymax=finalmodelfit$upr), fill="pink")+geom_line(aes(cycle_day, finalmodelfit$fit), color="red")+geom_point(color="red")
+
+
+finalmodelfit<-cbind(c(-14:13),  finalmodelfit)
+
+finalmodelfit<-round(finalmodelfit, 3)
+
+colnames(finalmodelfit)<-c("Cycle Day", "Expected Value", "Lower Confidence Interval", "Upper Confidence Interval")
+```
+
+```{r model fit, echo=F, results='asis'}
+
+finalmodelfit %>%stargazer(type = "html", summary = F)
+```
+
+
+## Multiple Linear Regression with Co-founders
+
+```{r multiple linear model on 2 periods,results='asis', echo=F}
+
+# linear model with confounding on confouding
+lm(mood_relative ~ cycle_day + daysq+ ageatsignup+ findingdatetime + gender + steps_count, data=juli_five_days) %>% stargazer(type = "html", summary=T)
+
+```
+
+
+ Final models with users with 5 or more days of observations. Plot with confidence intervals and daily change outputs presented, these are in terms of the change in standard deviations from the person's mean value.
+  
+# Secondary Findings
+
+### Relationship between HRV and Mood
+
+
+$$
+Mood(Realtive)  = HRV + Mood(Absolute) + c
+$$
+
+    Now we model the relationship between mood and HRV. We added in the absolute value of mood to scale the predictor. 
+    There is a statistical linear relationship between the HRV and mood (p=0.005).
+
+```{r hrv same day, echo=F, results='asis', warning=F}
+
+# linear model of hrv with the absolute value of 
+
+lm(mood_relative~ hrv  + mood , data=juli_five_days) %>% stargazer(type = "html", title="HRV and Mood", column.labels = c("Relative Mood Score (Std Dvs)"), covariate.labels=c("HRV", "Mood (Non-Standardised"))
+
+```
+
+
+
+
+## Mood and HRV Displacement 
+
+  Having observed the trends in the data, we want to explore if there is a delayed impact of the cycle on HRV. 
+
+
+```{r mood hrv day displacement, warning=F ,echo=F}
+
+#new variables referring to hrv from 1, 2, 3 days prior
+
+#need to make sure its the same user 
+# and the same cycle
+# need to adjust for positive values to then translate 
+
+# we need to see if for all days if there exists a hrv measurement 
+
+#give row numbers for identification.
+
+juli_five_days$X<-1:nrow(juli_five_days)
+
+#48% NA 
+
+juli_five_days$hrvminus1<-NA
+
+#note the cycle day, then get the cycle day - 1
+
+# for loop for users
+juli_five_days$date<-as.Date(juli_five_days$findingdatetime)
+
+# loop through the users
+for(i in unique(juli_five_days$userid)){
+
+user<-juli_five_days[juli_five_days$userid==i,]
+
+#traverse through dates and find dates -1
+
+dates<-as.Date(user$findingdatetime) # data is organised in chronological date order 
+
+  for(j in dates){
+    
+    #get 2 days prior
+    daysminus1<-j-1
+    
+    #does user have hrv records for days -2
+    hrvminus1_loop<-user[user$date==daysminus1,]$hrv
+
+
+    #check that there is a value before pushing into data frame
+      if(length(hrvminus1_loop>0) && !is.na(hrvminus1_loop)){
+        
+        #row number
+        val<-which(juli_five_days$X==user[user$date==j,]$X)
+
+        juli_five_days$hrvminus1[val]<-hrvminus1_loop
+      }
+    
+  }
+
+}
+
+#new row for hrvminus2
+
+juli_five_days$hrvminus2<-NA
+
+#note the cycle day, then get the cycle day - 2 
+
+# for loop for users
+juli_five_days$date<-as.Date(juli_five_days$findingdatetime)
+
+# loop through the users
+for(i in unique(juli_five_days$userid)){
+
+user<-juli_five_days[juli_five_days$userid==i,]
+
+#traverse through dates and find dates -2
+
+dates<-as.Date(user$findingdatetime) # data is organised in chronological date order 
+
+  for(j in dates){
+    
+    #get 2 days prior
+    daysminus2<-j-2
+    
+    #does user have hrv records for days -2
+    hrvminus2_loop<-user[user$date==daysminus2,]$hrv
+
+
+    #check that there is a value before pushing into data frame
+      if(length(hrvminus2_loop>0) && !is.na(hrvminus2_loop)){
+        
+        #row number
+        val<-which(juli_five_days$X==user[user$date==j,]$X)
+
+        juli_five_days$hrvminus2[val]<-hrvminus2_loop
+      }
+    
+  }
+
+}
+
+#new row for hrvminus3
+
+juli_five_days$hrvminus3<-NA
+
+#note the cycle day, then get the cycle day - 3
+
+
+# loop through the users
+for(i in unique(juli_five_days$userid)){
+
+user<-juli_five_days[juli_five_days$userid==i,]
+
+#traverse through dates and find dates -3
+
+dates<-as.Date(user$findingdatetime) # data is organised in chronological date order 
+
+  for(j in dates){
+    
+    #get 3 days prior
+    daysminus3<-j-3
+    
+    #does user have hrv records for days -3
+    hrvminus3_loop<-user[user$date==daysminus3,]$hrv
+
+
+    #check that there is a value before pushing into data frame
+      if(length(hrvminus3_loop>0) && !is.na(hrvminus3_loop)){
+        
+        #row number
+        val<-which(juli_five_days$X==user[user$date==j,]$X)
+
+        juli_five_days$hrvminus3[val]<-hrvminus3_loop
+      }
+    
+  }
+
+}
+
+```
+
+### Relationship between Mood and HRV with displacement
+
+  Modelling the relationship between Mood and HRV from the previous day (minus 1), the day before that (minus 2) and the one before (minus 3). 
+
+$$
+Mood(Realtive)  = HRVDayMinus1 + Mood (Absolute) + c
+$$
+
+$$
+Mood(Realtive)  = HRVDayMinus2 + Mood (Absolute) + c
+$$
+$$
+Mood(Realtive)  = HRVDayMinus3 + Mood (Absolute) + c
+$$
+
+  OLS linear model similarly significant relationship between day minus 1 (p=0.005), then minus 2 (p=0.005) and minus 3 days (p=0.005)
+
+```{r hrv with displacement models, results='asis', echo=F, message=F, warning=F}
+
+m0<-lm(mood_relative~ hrv  + mood , data=juli_five_days)
+
+m1<-lm(mood_relative~ hrvminus1  + mood , data=juli_five_days)
+
+m2<-lm(mood_relative~ hrvminus2 + mood, data=juli_five_days)
+
+m3<-lm(mood_relative~ hrvminus3+ mood, data=juli_five_days)
+
+stargazer(m0, m1, m2, m3, title="HRV and Mood, with Day Displacement", type="html", dep.var.caption ="Comparing different displacement Days",  column.labels = c("Same Day", "-1 Days", "-2 Days", "-3 Days"), covariate.labels=c("Same Day", "-1 Days", "-2 Days", "-3 Days", "Mood"))
+
+```
+
+## Mood and Cycle day
+
+  A linear model shows that cycle day is linearly related to number of steps someone takes each day (p<0.001) Another linear models shows that relative mood change and step count are also linearly related (p<0.001). 
+  
+
+```{r cycle steps, message=F, warning=F, echo=F, results='asis'}
+
+step_lm<-lm(steps_count ~ cycle_day, data= juli_five_days )
+
+juli_five_days$cycle_day<-as.numeric(juli_five_days$cycle_day)
+
+step_lm %>% stargazer(type="html")
+
+step_lm_predicts<-predict(step_lm, list("cycle_day"=x, "daysq"=xsq),  interval = "confidence") %>% as_tibble()
+
+
+juli_five_days%>% subset(cycle_day<14)%>%  group_by(cycle_day)%>% summarise("day_mean"= mean(steps_count, na.rm=T)) %>%  ggplot( aes(cycle_day,day_mean))+ geom_ribbon(aes(ymin= step_lm_predicts$lwr, ymax=step_lm_predicts$upr), col="lightgrey")+geom_point(col="blue")+ geom_line(aes(y= step_lm_predicts$fit, x=x), col="lightblue")+ labs(x="Day of Cycle", y= "Step Count")+ggtitle("Population Step Count by Day of Cycle")+ theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+
+
+### Mood and step count
+
+
+```{r mood steps, results='asis', echo=F}
+
+mood_step_lm<-lm(steps_count~ mood_relative , data= juli_five_days )
+
+mood_step_lm %>% stargazer(type = "html")
+
+
+```
+
+
+## Cycle Day and Energy 
+
+  Exploring the relationship between recorded energy level and MC day.  
+
+```{r energy transform, echo=F}
+
+#new variable of energy 1-7 so that each measure is equidistant.
+
+juli_mood$energy<-1 #0 will stay as 1
+juli_mood$energy[juli_mood$dq_mood_energy==2]<-2
+juli_mood$energy[juli_mood$dq_mood_energy==4]<-3
+juli_mood$energy[juli_mood$dq_mood_energy==5]<-4
+juli_mood$energy[juli_mood$dq_mood_energy==6]<-5
+juli_mood$energy[juli_mood$dq_mood_energy==8]<-6
+juli_mood$energy[juli_mood$dq_mood_energy==10]<-7
+
+```
+
+
+  There is no relationship between energy and day of cycle.
+
+```{r energy, echo=F}
+
+new_gam_energy<-mgcv::gam(energy~ s(cycle_day), data=juli_mood)
+
+summary(new_gam_energy)
+
+```
+
+
+
+
+
